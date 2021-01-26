@@ -1,0 +1,247 @@
+#include "pml_hash.h"
+/**
+ * PMLHash::PMLHash 
+ * 
+ * @param  {char*} file_path : the file path of data file
+ * if the data file exist, open it and recover the hash
+ * if the data file does not exist, create it and initial the hash
+ */
+PMLHash::PMLHash(const char* file_path) {
+    char *pmemaddr;
+	size_t mapped_len;
+	int is_pmem;
+
+	/* create a pmem file and memory map it */
+
+	if ((pmemaddr = pmem_map_file(file_path, FILE_SIZE, PMEM_FILE_CREATE,
+			0666, &mapped_len, &is_pmem)) == NULL) {
+		perror("pmem_map_file");
+		exit(1);
+	}
+
+    this->start_addr = pmemaddr;
+    this->overflow_addr = newOverflowTable(1024*1024*8);
+    this->meta = new metadata();
+	this->meta->size = TABLE_SIZE;
+    this->table_arr = new pm_table(TABLE_SIZE);
+}
+/**
+ * PMLHash::~PMLHash 
+ * 
+ * unmap and close the data file
+ */
+PMLHash::~PMLHash() {
+    pmem_unmap(start_addr, FILE_SIZE);
+}
+/**
+ * PMLHash 
+ * 
+ * split the hash table indexed by the meta->next
+ * update the metadata
+ */
+void PMLHash::split() {
+    // fill the split table
+
+    // fill the new table
+
+    // update the next of metadata
+//     typedef struct pm_table {
+//     entry kv_arr[TABLE_SIZE];   // data entry array of hash table
+//     uint64_t fill_num;          // amount of occupied slots in kv_arr
+//     uint64_t next_offset;       // the file address of overflow hash table 
+// } pm_table;
+    auto newTable = new pm_table();
+
+    auto oldTable = this->table_arr[next];
+    auto oldTablePos = 0, newTablePos = 0;
+    for (auto i = 0; i < oldTable.fill_num; i++) {
+        if (oldTable.kv_arr[i]/this->meta->size % 2 == 1) {
+            newTable.kv_arr[newTablePos++] = oldTable.kv_arr[i];
+        } else {
+            oldTable.kv_arr[oldTablePos++] = oldTable.kv_arr[i];
+        }
+    }
+    this->meta->next++;
+    if (this->meta->next == this->meta->size) {
+        this->meta->size *= 2;
+        this->meta->next = 0;
+        this->meta->level++;
+    }
+    return;
+}
+/**
+ * PMLHash 
+ * 
+ * @param  {uint64_t} key     : key
+ * @param  {size_t} hash_size : the N in hash func: idx = hash % N
+ * @return {uint64_t}         : index of hash table array
+ * 
+ * need to hash the key with proper hash function first
+ * then calculate the index by N module
+ */
+uint64_t PMLHash::hashFunc(const uint64_t &key, const size_t &hash_size) {
+    uint64_t pos = key % hash_size;
+    if (pos < next) {
+        pos = key % (hash_size*2);
+    }
+    return pos;
+}
+
+/**
+ * PMLHash 
+ * 
+ * @param  {uint64_t} offset : the file address offset of the overflow hash table
+ *                             to the start of the whole file
+ * @return {pm_table*}       : the virtual address of new overflow hash table
+ */
+pm_table* PMLHash::newOverflowTable(uint64_t &offset) {
+    return this->start_addr+offset;
+}
+
+/**
+ * PMLHash 
+ * 
+ * @param  {uint64_t} key   : inserted key
+ * @param  {uint64_t} value : inserted value
+ * @return {int}            : success: 0. fail: -1
+ * 
+ * insert the new kv pair in the hash
+ * 
+ * always insert the entry in the first empty slot
+ * 
+ * if the hash table is full then split is triggered
+ */
+int PMLHash::insert(const uint64_t &key, const uint64_t &value) {
+    auto newEntry = new entry(key, value);
+    auto pos = hashFunc(key, HASH_SIZE);
+    int next = this->meta->next;
+    if (this->table_arr->fill_num == TABLE_SIZE) { // 判断是否需要分裂
+        split();
+        if (next != pos) {  // 不是分裂这个节点，overflow
+            int newPos = this->overflow_addr[pos].fill_num;
+            this->overflow_addr[pos].kv_arr[newPos] = *newEntry;
+            this->overflow_addr[pos].fill_num++;
+            this->meta->overflow_num++;
+            pmem_persist(start_addr, FILE_SIZE);
+            return 0;
+        } else {  // 分裂后直接判断需要插入哪个节点
+            pos = hashFunc(key, HASH_SIZE);
+            int newPos = this->start_addr[pos].fill_num;
+            this->start_addr[pos].kv_arr[newPos] = *newEntry;
+            this->start_addr[pos].fill_num++;
+            pmem_persist(start_addr, FILE_SIZE);
+            return 0;
+        }
+    } else {
+        // 直接插入指定位置
+        int newPos = this->start_addr[pos].fill_num;
+        this->start_addr[pos].kv_arr[newPos] = *newEntry;
+        this->start_addr[pos].fill_num++;
+        pmem_persist(start_addr, FILE_SIZE);
+        return 0;
+    }
+    return -1;
+}
+
+/**
+ * PMLHash 
+ * 
+ * @param  {uint64_t} key   : the searched key
+ * @param  {uint64_t} value : return value if found
+ * @return {int}            : 0 found, -1 not found
+ * 
+ * search the target entry and return the value
+ */
+int PMLHash::search(const uint64_t &key, uint64_t &value) {
+    auto pos = hashFunc(key);
+    auto table = this->start_addr[pos];
+    auto len = table.fill_num;
+    for (auto i = 0; i < len; i++) {
+        if (table.kv_arr[i].key == key) {
+            value = table.kv_arr[i].value;
+            return 0;
+        }
+    }
+    if (len == TABLE_SIZE) { // 判断溢出表中是否存在
+        auto table = this->overflow_addr[pos];
+        auto len = table.fill_num;
+        for (auto i = 0; i < len; i++) {
+            if (table.kv_arr[i].key == key) {
+                value = table.kv_arr[i].value;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+/**
+ * PMLHash 
+ * 
+ * @param  {uint64_t} key : target key
+ * @return {int}          : success: 0. fail: -1
+ * 
+ * remove the target entry, move entries after forward
+ * if the overflow table is empty, remove it from hash
+ */
+int PMLHash::remove(const uint64_t &key) {
+    auto pos = hashFunc(key);
+    auto table = &(this->start_addr[pos]);
+    auto len = table->fill_num;
+    for (auto i = 0; i < len; i++) {
+        if (table->kv_arr[i].key == key) {
+            for (auto j = i+1; j < len-1; j++) {  // 将后面的数往前移动
+                table->kv_arr[j] = table->kv_arr[j+1];
+            }
+            table->fill_num--;
+            return 0;
+        }
+    }
+    if (len == TABLE_SIZE) { // 判断溢出表中是否存在
+        auto table = &(this->overflow_addr[pos]);
+        auto len = table->fill_num;
+        for (auto i = 0; i < len; i++) {
+            if (table->kv_arr[i].key == key) {
+                for (auto j = i+1; j < len-1; j++) {  // 将后面的数往前移动
+                    table->kv_arr[j] = table->kv_arr[j+1];
+                }
+                table->fill_num--;
+                this->meta->overflow_num--;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+/**
+ * PMLHash 
+ * 
+ * @param  {uint64_t} key   : target key
+ * @param  {uint64_t} value : new value
+ * @return {int}            : success: 0. fail: -1
+ * 
+ * update an existing entry
+ */
+int PMLHash::update(const uint64_t &key, const uint64_t &value) {
+    auto pos = hashFunc(key);
+    auto table = &(this->start_addr[pos]);
+    auto len = table->fill_num;
+    for (auto i = 0; i < len; i++) {
+        if (table->kv_arr[i].key == key) {
+            table->kv_arr[i].value = value;
+            return 0;
+        }
+    }
+    if (len == TABLE_SIZE) { // 判断溢出表中是否存在
+        auto table = &(this->overflow_addr[pos]);
+        auto len = table->fill_num;
+        for (auto i = 0; i < len; i++) {
+            if (table->kv_arr[i].key == key) {
+                value = table->kv_arr[i].value;
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
