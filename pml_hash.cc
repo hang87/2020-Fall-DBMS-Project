@@ -11,8 +11,7 @@ PMLHash::PMLHash(const char* file_path) {
 	size_t mapped_len;
 	int is_pmem;
 
-	/* create a pmem file and memory map it */
-
+    // 这个函数将目标文件通过内存映射的方式打开
 	if ((pmemaddr = pmem_map_file(file_path, FILE_SIZE, PMEM_FILE_CREATE,
 			0666, &mapped_len, &is_pmem)) == NULL) {
 		perror("pmem_map_file");
@@ -20,10 +19,13 @@ PMLHash::PMLHash(const char* file_path) {
 	}
 
     this->start_addr = pmemaddr;
-    this->overflow_addr = newOverflowTable(1024*1024*8);
-    this->meta = new metadata();
+    void* meta_buf = reinterpret_cast<void*>(pmemaddr);
+    this->meta = new(meta_buf) metadata;
 	this->meta->size = TABLE_SIZE;
-    this->table_arr = new pm_table(TABLE_SIZE);
+
+    void* table_buf = reinterpret_cast<void*>(pmemaddr+1024); // 给meta数据安排1KB的内存
+    this->table_arr = new(table_buf) pm_table;
+    this->overflow_addr = this->table_arr+1024*1024*8-1024;
 }
 /**
  * PMLHash::~PMLHash 
@@ -31,6 +33,7 @@ PMLHash::PMLHash(const char* file_path) {
  * unmap and close the data file
  */
 PMLHash::~PMLHash() {
+    // 这个函数用于关闭pmem_map打开的NVM文件
     pmem_unmap(start_addr, FILE_SIZE);
 }
 /**
@@ -41,18 +44,13 @@ PMLHash::~PMLHash() {
  */
 void PMLHash::split() {
     // fill the split table
-
     // fill the new table
+    int size = this->meta->size;
+    // 在原数组后面加上一个新桶
+    void* newBuf = reinterpret_cast<void*>(table_arr+size*sizeof(pm_table));
+    auto newTable = new(newBuf) pm_table;
 
-    // update the next of metadata
-//     typedef struct pm_table {
-//     entry kv_arr[TABLE_SIZE];   // data entry array of hash table
-//     uint64_t fill_num;          // amount of occupied slots in kv_arr
-//     uint64_t next_offset;       // the file address of overflow hash table 
-// } pm_table;
-    auto newTable = new pm_table();
-
-    auto oldTable = this->table_arr[next];
+    auto oldTable = this->table_arr[this->meta->next];
     auto oldTablePos = 0, newTablePos = 0;
     for (auto i = 0; i < oldTable.fill_num; i++) {
         if (oldTable.kv_arr[i]/this->meta->size % 2 == 1) {
@@ -62,11 +60,13 @@ void PMLHash::split() {
         }
     }
     this->meta->next++;
+    this->meta->size++;
     if (this->meta->next == this->meta->size) {
-        this->meta->size *= 2;
         this->meta->next = 0;
         this->meta->level++;
     }
+
+    pmem_persist(start_addr, FILE_SIZE); // 这个函数调用CLFLUSH和SFENCE指令来显式持久化相应的数据
     return;
 }
 /**
@@ -80,7 +80,7 @@ void PMLHash::split() {
  * then calculate the index by N module
  */
 uint64_t PMLHash::hashFunc(const uint64_t &key, const size_t &hash_size) {
-    uint64_t pos = key % hash_size;
+    uint64_t pos = key % *(hash_size*this->meta->level);
     if (pos < next) {
         pos = key % (hash_size*2);
     }
@@ -95,7 +95,11 @@ uint64_t PMLHash::hashFunc(const uint64_t &key, const size_t &hash_size) {
  * @return {pm_table*}       : the virtual address of new overflow hash table
  */
 pm_table* PMLHash::newOverflowTable(uint64_t &offset) {
-    return this->start_addr+offset;
+    // 再偏移值后面新建一个和原数据表一样大小的数据表
+    auto addr = this->start_addr+offset
+    void* newBuf = reinterpret_cast<void*>(table_arr+size*sizeof(pm_table));
+    auto newTable = new(newBuf) pm_table[this->meta->size];
+    return addr;
 }
 
 /**
