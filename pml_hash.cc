@@ -80,11 +80,13 @@ void PMLHash::split() {
  * then calculate the index by N module
  */
 uint64_t PMLHash::hashFunc(const uint64_t &key, const size_t &hash_size) {
-    uint64_t pos = key % *(hash_size*this->meta->level);
+    uint64_t PMLHash::hashFunc(const uint64_t &key, const size_t &hash_size) {
+    uint64_t pos = key % (hash_size*math.pow(2,this->meta->level)); // 取模公式
     if (pos < next) {
-        pos = key % (hash_size*2);
+        pos = key % (hash_size*math.pow(2,this->meta->level+1)); // 该节点以及分裂过了
     }
     return pos;
+}
 }
 
 /**
@@ -120,7 +122,6 @@ int PMLHash::insert(const uint64_t &key, const uint64_t &value) {
     auto pos = hashFunc(key, HASH_SIZE);
     int next = this->meta->next;
     if (this->table_arr->fill_num == TABLE_SIZE) { // 判断是否需要分裂
-        split();
         if (next != pos) {  // 不是分裂这个节点，overflow
             int newPos = this->overflow_addr[pos].fill_num;
             this->overflow_addr[pos].kv_arr[newPos] = *newEntry;
@@ -129,18 +130,19 @@ int PMLHash::insert(const uint64_t &key, const uint64_t &value) {
             pmem_persist(start_addr, FILE_SIZE);
             return 0;
         } else {  // 分裂后直接判断需要插入哪个节点
+            split();
             pos = hashFunc(key, HASH_SIZE);
-            int newPos = this->start_addr[pos].fill_num;
-            this->start_addr[pos].kv_arr[newPos] = *newEntry;
-            this->start_addr[pos].fill_num++;
+            int newPos = this->table_arr[pos].fill_num;
+            this->table_arr[pos].kv_arr[newPos] = *newEntry;
+            this->table_arr[pos].fill_num++;
             pmem_persist(start_addr, FILE_SIZE);
             return 0;
         }
     } else {
         // 直接插入指定位置
-        int newPos = this->start_addr[pos].fill_num;
-        this->start_addr[pos].kv_arr[newPos] = *newEntry;
-        this->start_addr[pos].fill_num++;
+        int newPos = this->table_arr[pos].fill_num;
+        this->table_arr[pos].kv_arr[newPos] = *newEntry;
+        this->table_arr[pos].fill_num++;
         pmem_persist(start_addr, FILE_SIZE);
         return 0;
     }
@@ -158,11 +160,11 @@ int PMLHash::insert(const uint64_t &key, const uint64_t &value) {
  */
 int PMLHash::search(const uint64_t &key, uint64_t &value) {
     auto pos = hashFunc(key);
-    auto table = this->start_addr[pos];
+    auto table = this->table_arr[pos]; // 判断溢出表中是否存在
     auto len = table.fill_num;
-    for (auto i = 0; i < len; i++) {
-        if (table.kv_arr[i].key == key) {
-            value = table.kv_arr[i].value;
+    for (auto i = 0; i < len; i++) { // 顺序查找
+        if (table.kv_arr[i].key == key && table.kv_arr[i].value == value) {
+            
             return 0;
         }
     }
@@ -170,8 +172,7 @@ int PMLHash::search(const uint64_t &key, uint64_t &value) {
         auto table = this->overflow_addr[pos];
         auto len = table.fill_num;
         for (auto i = 0; i < len; i++) {
-            if (table.kv_arr[i].key == key) {
-                value = table.kv_arr[i].value;
+            if (table.kv_arr[i].key == key && table.kv_arr[i].value == value) {
                 return 0;
             }
         }
@@ -190,9 +191,9 @@ int PMLHash::search(const uint64_t &key, uint64_t &value) {
  */
 int PMLHash::remove(const uint64_t &key) {
     auto pos = hashFunc(key);
-    auto table = &(this->start_addr[pos]);
+    auto table = &(this->table_arr[pos]);
     auto len = table->fill_num;
-    for (auto i = 0; i < len; i++) {
+    for (auto i = 0; i < len; i++) {  // 先判断原始哈希表中是否存在
         if (table->kv_arr[i].key == key) {
             for (auto j = i+1; j < len-1; j++) {  // 将后面的数往前移动
                 table->kv_arr[j] = table->kv_arr[j+1];
@@ -229,11 +230,11 @@ int PMLHash::remove(const uint64_t &key) {
  */
 int PMLHash::update(const uint64_t &key, const uint64_t &value) {
     auto pos = hashFunc(key);
-    auto table = &(this->start_addr[pos]);
+    auto table = &(this->table_arr[pos]);
     auto len = table->fill_num;
     for (auto i = 0; i < len; i++) {
         if (table->kv_arr[i].key == key) {
-            table->kv_arr[i].value = value;
+            table->kv_arr[i].value = value; // 修改value
             return 0;
         }
     }
@@ -242,7 +243,7 @@ int PMLHash::update(const uint64_t &key, const uint64_t &value) {
         auto len = table->fill_num;
         for (auto i = 0; i < len; i++) {
             if (table->kv_arr[i].key == key) {
-                value = table->kv_arr[i].value;
+                table->kv_arr[i].value = value; // 修改value
                 return 0;
             }
         }
