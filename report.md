@@ -319,3 +319,11 @@ int PMLHash::search(const uint64_t &key, uint64_t &value) {
 }
 ```
 
+#### 参考
+
+1. https://github.com/pmem/pmdk-examples/tree/master/hello_world/libpmem
+2. https://blog.csdn.net/SweeNeil/article/details/90265226
+3. https://github.com/ZhangJiaQiao/2020-Fall-DBMS-Project
+4. https://www.it1352.com/351047.html
+5. https://blog.csdn.net/jackydai987/article/details/6673063
+
